@@ -3,7 +3,7 @@ project(NES-emulator LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 
-set(nes_core_sources src/bus.cpp src/cpu.cpp)
+set(nes_core_sources src/bus.cpp src/cpu.cpp src/ines.cpp)
 
 add_executable(run main.cpp ${nes_core_sources})
 target_include_directories(run PRIVATE ${CMAKE_SOURCE_DIR}/include)
