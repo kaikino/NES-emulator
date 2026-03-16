@@ -95,9 +95,8 @@ void PPU::cpu_write(u16 addr, u8 value) {
         x_ = value & 0x07;                                       // bits 0-2: fine X (bits 0-2 of x)
         w_ = true;                                            // set write toggle to true
       } else {   // second write: Y scroll
-        t_ = (t_ & 0x8C1F) | (static_cast<u16>(value & 0x07) << 12);  // bits 0-2: fine Y (bits 12-14 of t)
-        t_ = (t_ & 0xFBE0) | (static_cast<u16>(value & 0xF8) << 2);   // bits 3-7: coarse Y (bits 5-9 of t)
-        w_ = false;                                                   // set write toggle to false
+        t_ = (t_ & 0x8C1F) | (static_cast<u16>(value & 0x07) << 12) | (static_cast<u16>(value & 0xF8) << 2);
+        w_ = false;
       }
       break;
     case 6:  // PPUADDR
@@ -144,9 +143,8 @@ void PPU::tick() {
   if (cycle_ == 0 && scanline_ >= 0 && scanline_ < fb_height)
     render_scanline();
 
-  // visible scanlines: copy horizontal scroll bits from T to V at dot 257
-  // coarse X and nametable X bit reload from t each scanline
-  if (scanline_ < fb_height && cycle_ == 257 && rendering)
+  // copy horizontal scroll bits from T to V at dot 257 (visible and pre-render so scanline 0 gets correct scroll)
+  if (cycle_ == 257 && rendering && (scanline_ < fb_height || scanline_ == 261))
     v_ = (v_ & ~0x041F) | (t_ & 0x041F);
 
   ++cycle_;
