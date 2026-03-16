@@ -97,11 +97,11 @@ int main(int argc, char* argv[]) {
         quit = true;
     }
 
-    // poll keyboard for controller 1
+    // poll keyboard for controller 1 (arrows + M/N + Rshift/Return)
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
     nes::u8 pad = 0;
-    if (keys[SDL_SCANCODE_Z])      pad |= nes::Apu::btn_a;
-    if (keys[SDL_SCANCODE_X])      pad |= nes::Apu::btn_b;
+    if (keys[SDL_SCANCODE_M])      pad |= nes::Apu::btn_a;
+    if (keys[SDL_SCANCODE_N])      pad |= nes::Apu::btn_b;
     if (keys[SDL_SCANCODE_RSHIFT]) pad |= nes::Apu::btn_select;
     if (keys[SDL_SCANCODE_RETURN]) pad |= nes::Apu::btn_start;
     if (keys[SDL_SCANCODE_UP])     pad |= nes::Apu::btn_up;
@@ -109,6 +109,18 @@ int main(int argc, char* argv[]) {
     if (keys[SDL_SCANCODE_LEFT])   pad |= nes::Apu::btn_left;
     if (keys[SDL_SCANCODE_RIGHT])  pad |= nes::Apu::btn_right;
     apu.set_button_state(0, pad);
+
+    // poll keyboard for controller 2 (WASD + X/Z + Lshift/Tab)
+    nes::u8 pad2 = 0;
+    if (keys[SDL_SCANCODE_V])      pad2 |= nes::Apu::btn_a;
+    if (keys[SDL_SCANCODE_C])      pad2 |= nes::Apu::btn_b;
+    if (keys[SDL_SCANCODE_LSHIFT]) pad2 |= nes::Apu::btn_select;
+    if (keys[SDL_SCANCODE_TAB])    pad2 |= nes::Apu::btn_start;
+    if (keys[SDL_SCANCODE_W])      pad2 |= nes::Apu::btn_up;
+    if (keys[SDL_SCANCODE_S])      pad2 |= nes::Apu::btn_down;
+    if (keys[SDL_SCANCODE_A])      pad2 |= nes::Apu::btn_left;
+    if (keys[SDL_SCANCODE_D])      pad2 |= nes::Apu::btn_right;
+    apu.set_button_state(1, pad2);
 
     // run one CPU instruction; advance PPU in lockstep
     int cycles = cpu.step();
