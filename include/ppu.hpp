@@ -3,7 +3,6 @@
 #include "types.hpp"
 #include <array>
 #include <cstddef>
-#include <functional>
 
 namespace nes {
 
@@ -35,8 +34,8 @@ class PPU {
   static constexpr int fb_height = 240;
   static constexpr int fb_bytes_per_pixel = 3;
 
-  // set NMI callback handler for Vblank
-  void set_nmi_callback(std::function<void()> cb) { on_nmi_ = std::move(cb); }
+  // check and clear pending NMI (set at VBlank when NMI enabled)
+  bool take_nmi_pending() { bool p = nmi_pending_; nmi_pending_ = false; return p; }
 
   // PPUCTRL   $2000  VPHB SINN            W    NMI enable (V), PPU master/slave (P), sprite height (H), background tile select (B),
   // 7  bit  0                                   sprite tile select (S), increment mode (I), nametable select (NN)
@@ -147,8 +146,7 @@ class PPU {
   // 2C00–2FFF        1      1
   bool mirror_vertical_;
 
-  // NMI callback handler for Vblank
-  std::function<void()> on_nmi_;
+  bool nmi_pending_{false};  // set at VBlank start when NMI enabled
 
   // PPU timing
   int cycle_{0};    // 0-339 (340 cycles per scanline)

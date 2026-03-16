@@ -1,3 +1,4 @@
+#include "apu.hpp"
 #include "bus.hpp"
 #include "cpu.hpp"
 #include "ines.hpp"
@@ -33,6 +34,10 @@ int main(int argc, char* argv[]) {
               cart.mirror_vertical);
   bus.set_ppu(&ppu);
 
+  // create APU/IO; attach to bus for $4000-$4017
+  nes::Apu apu;
+  bus.set_apu(&apu);
+
   // create CPU; set PC from reset vector ($FFFC/$FFFD), init stack and flags
   nes::CPU cpu(bus);
   nes::u16 reset_lo = bus.read(0xFFFC);
@@ -40,8 +45,6 @@ int main(int argc, char* argv[]) {
   cpu.PC = reset_lo | (reset_hi << 8);
   cpu.S = 0xFD;
   cpu.P = nes::flag::U | nes::flag::I;
-  ppu.set_nmi_callback([&cpu]() { cpu.nmi(); });  // Vblank -> NMI
-
   if (SDL_Init(SDL_INIT_VIDEO) != 0) {
     std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
     return 1;
@@ -81,6 +84,7 @@ int main(int argc, char* argv[]) {
   std::printf("Reset vector: $%04X\n", cpu.PC);
 
   bool quit = false;
+  long total_cpu_cycles = 0;
   while (!quit) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -88,8 +92,32 @@ int main(int argc, char* argv[]) {
         quit = true;
     }
 
-    int cycles = cpu.step();              // run one instruction
-    ppu.run_cycles(3 * cycles);           // 3 PPU cycles per CPU cycle
+    // poll keyboard for controller 1
+    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    nes::u8 pad = 0;
+    if (keys[SDL_SCANCODE_Z])      pad |= nes::Apu::btn_a;
+    if (keys[SDL_SCANCODE_X])      pad |= nes::Apu::btn_b;
+    if (keys[SDL_SCANCODE_RSHIFT]) pad |= nes::Apu::btn_select;
+    if (keys[SDL_SCANCODE_RETURN]) pad |= nes::Apu::btn_start;
+    if (keys[SDL_SCANCODE_UP])     pad |= nes::Apu::btn_up;
+    if (keys[SDL_SCANCODE_DOWN])   pad |= nes::Apu::btn_down;
+    if (keys[SDL_SCANCODE_LEFT])   pad |= nes::Apu::btn_left;
+    if (keys[SDL_SCANCODE_RIGHT])  pad |= nes::Apu::btn_right;
+    apu.set_button_state(0, pad);
+
+    // run one CPU instruction; advance PPU in lockstep
+    int cycles = cpu.step();
+    if (bus.take_dma_pending())                         // OAM DMA triggered by $4014 write
+      cycles += 513 + (total_cpu_cycles & 1);           // 513 cycles (+1 on odd CPU cycle)
+    total_cpu_cycles += cycles;
+    ppu.run_cycles(3 * cycles);                         // 3 PPU cycles per CPU cycle
+
+    // NMI is sampled between instructions (PPU may have set it during the ticks above)
+    if (ppu.take_nmi_pending()) {
+      int nmi_cycles = cpu.nmi();
+      total_cpu_cycles += nmi_cycles;
+      ppu.run_cycles(3 * nmi_cycles);
+    }
 
     if (ppu.frame_ready()) {                // new frame finished: upload fb and present
       void* pixels = nullptr;

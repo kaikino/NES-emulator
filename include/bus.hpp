@@ -5,6 +5,7 @@
 
 namespace nes {
 
+class Apu;
 class PPU;
 
 // manages CPU memory map
@@ -33,6 +34,12 @@ class Bus {
   // attach PPU for $2000-$3FFF
   void set_ppu(PPU* ppu) { ppu_ = ppu; }
 
+  // attach APU/IO for $4000-$4017
+  void set_apu(Apu* apu) { apu_ = apu; }
+
+  // check and clear pending OAM DMA flag (set by write to $4014)
+  bool take_dma_pending() { bool p = dma_pending_; dma_pending_ = false; return p; }
+
   // CPU Memory Map
   // Address range  Size     Device
   // $0000–$07FF    $0800    2 KB internal RAM
@@ -57,9 +64,11 @@ class Bus {
 
   bool const nes_mapping_;
   PPU* ppu_{nullptr};
+  Apu* apu_{nullptr};
   std::vector<u8> ram_{};         // legacy: 64KB flat; NES: 2KB internal ($0000-$1FFF)
   std::vector<u8> prg_ram_{};      // NES only ($6000-$7FFF)
   std::vector<u8> prg_rom_{};      // $8000-$FFFF, size set by load_prg (mirror by decode)
+  bool dma_pending_{false};          // set when $4014 write triggers OAM DMA
 };
 
 }  // namespace nes

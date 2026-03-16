@@ -1,4 +1,5 @@
 #include "bus.hpp"
+#include "apu.hpp"
 #include "ppu.hpp"
 
 namespace nes {
@@ -8,7 +9,7 @@ namespace {
 constexpr u16 ram_mask = 0x07FF;       // to decode mirrored internal ram addresses to $0000-$07FF range
 constexpr u16 ram_end = 0x2000;        // $0000-$1FFF
 constexpr u16 ppu_end = 0x4000;        // $2000-$3FFF
-constexpr u16 apu_end = 0x4017;        // $4000-$4017
+constexpr u16 apu_end = 0x4018;        // $4000-$4017
 constexpr u16 prg_ram_start = 0x6000;  // $6000-$7FFF
 constexpr u16 prg_rom_start = 0x8000;  // $8000-$FFFF
 
@@ -61,7 +62,9 @@ u8 Bus::read_nes(u16 addr) const {
     return 0;
   }
   if (addr < apu_end) {
-    // APU / I/O stub: open bus (return 0)
+    // $4000-$4017: APU and I/O registers
+    if (apu_)
+      return apu_->cpu_read(addr);
     return 0;
   }
   if (addr < prg_ram_start) {
@@ -89,7 +92,17 @@ void Bus::write_nes(u16 addr, u8 value) {
     return;
   }
   if (addr < apu_end) {
-    // APU / I/O stub: no-op
+    // $4014: OAM DMA — copy 256 bytes from CPU page to PPU OAM (~513 CPU cycles)
+    if (addr == 0x4014 && ppu_) {
+      const u16 base = static_cast<u16>(value) << 8;
+      for (int i = 0; i < 0x100; ++i)
+        ppu_->cpu_write(0x2004, read(base + i));
+      dma_pending_ = true;
+      return;
+    }
+    // $4000-$4017: APU and I/O registers
+    if (apu_)
+      apu_->cpu_write(addr, value);
     return;
   }
   if (addr < prg_ram_start) {

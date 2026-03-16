@@ -127,10 +127,8 @@ void PPU::run_cycles(int n) {
 void PPU::tick() {
   if (scanline_ == kVblankScanline && cycle_ == 1) {  // start of vblank (scanline 241, dot 1)
     status_ |= 0x80;  // update vblank bit in PPUSTATUS
-    if (ctrl_ & 0x80) {  // if Vblank NMI enabled (PPUCTRL bit 7)
-      if (on_nmi_)
-        on_nmi_();       // call NMI handler if set
-    }
+    if (ctrl_ & 0x80)    // if Vblank NMI enabled (PPUCTRL bit 7)
+      nmi_pending_ = true;
   }
 
   if (cycle_ == 0 && scanline_ >= 0 && scanline_ < fb_height) {

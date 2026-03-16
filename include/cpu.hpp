@@ -11,10 +11,10 @@ class CPU {
  public:
   explicit CPU(Bus& bus);
 
-  // reset, NMI, and IRQ
+  // reset, NMI, and IRQ (return CPU cycles consumed)
   void reset();
-  void nmi();
-  void irq();
+  int nmi();
+  int irq();
 
   // Execute one instruction; return number of cycles used.
   int step();

@@ -66,22 +66,24 @@ void CPU::reset() {
   PC = read(reset_vector_lo) | (static_cast<u16>(read(reset_vector_hi)) << 8);
 }
 
-void CPU::nmi() {
+int CPU::nmi() {
   push(static_cast<u8>(PC >> 8));
   push(static_cast<u8>(PC));
   push((P & ~flag::B) | flag::U);  // B=0 for NMI
   P |= flag::I;
   PC = read(nmi_vector_lo) | (static_cast<u16>(read(nmi_vector_hi)) << 8);
+  return 7;
 }
 
-void CPU::irq() {
+int CPU::irq() {
   if (get_I())
-    return;
+    return 0;
   push(static_cast<u8>(PC >> 8));
   push(static_cast<u8>(PC));
   push((P & ~flag::B) | flag::U);  // B=0 for IRQ
   P |= flag::I;
   PC = read(irq_vector_lo) | (static_cast<u16>(read(irq_vector_hi)) << 8);
+  return 7;
 }
 
 int CPU::step() {
