@@ -50,9 +50,11 @@ int main(int argc, char* argv[]) {
     return 1;
   }
   constexpr int scale = 3;
+  constexpr int overscan = 8;  // hide top/bottom 8 scanlines (NTSC overscan)
+  constexpr int visible_height = nes::PPU::fb_height - overscan * 2;  // 224
   SDL_Window* win = SDL_CreateWindow("NES",
                                     SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                    nes::PPU::fb_width * scale, nes::PPU::fb_height * scale,
+                                    nes::PPU::fb_width * scale, visible_height * scale,
                                     0);
   if (!win) {
     std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
@@ -150,7 +152,7 @@ int main(int argc, char* argv[]) {
       int nmi_cycles = cpu.nmi();
       total_cpu_cycles += nmi_cycles;
       ppu.run_cycles(3 * nmi_cycles);
-      apu.tick(nmi_cycles);
+      apu.run_cycles(nmi_cycles);
     }
 
     if (ppu.frame_ready()) {                // new frame finished: upload fb and present
@@ -163,8 +165,9 @@ int main(int argc, char* argv[]) {
         SDL_UnlockTexture(tex);
       }
       ppu.clear_frame_ready();
+      SDL_Rect src = {0, overscan, nes::PPU::fb_width, visible_height};
       SDL_RenderClear(ren);
-      SDL_RenderCopy(ren, tex, nullptr, nullptr);
+      SDL_RenderCopy(ren, tex, &src, nullptr);
       SDL_RenderPresent(ren);
 
       // drain APU sample buffer and queue for playback

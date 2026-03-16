@@ -82,16 +82,54 @@ class Apu {
     u8 volume() const { return constant_vol ? env_period : env_decay; }
   };
 
-  void tick();                      // advance one CPU cycle
-  void quarter_frame();                 // clock envelopes
-  void half_frame();                    // clock length counters + sweeps
+  // triangle channel state ($4008-$400B)
+  struct TriangleChannel {
+    u16 timer_period{0};
+    u16 timer{0};
+    u8 sequencer_pos{0};     // 0-31, 32-step waveform
+    u8 length{0};
+    u8 linear_counter{0};
+    u8 linear_reload{0};     // reload value from $4008
+    bool linear_reload_flag{false};
+    bool linear_control{false};  // halt length when set
+    bool enabled{false};
+  };
+
+  // noise channel state ($400C-$400F)
+  struct NoiseChannel {
+    u16 timer_period{0};     // from period table
+    u16 timer{0};
+    u16 lfsr{1};             // 15-bit, never 0
+    bool mode{false};        // feedback bit: bit1 (mode 0) or bit6 (mode 1)
+    u8 length{0};
+    bool env_start{false};
+    u8 env_divider{0};
+    u8 env_decay{0};
+    u8 env_period{0};
+    bool env_loop{false};
+    bool constant_vol{false};
+    bool enabled{false};
+    u8 volume() const { return constant_vol ? env_period : env_decay; }
+  };
+
+  void tick();
+  void quarter_frame();
+  void half_frame();
   void clock_envelope(PulseChannel& p);
+  void clock_envelope(NoiseChannel& n);
   void clock_length(PulseChannel& p);
+  void clock_length(TriangleChannel& t);
+  void clock_length(NoiseChannel& n);
+  void clock_linear_counter();
   void clock_sweep(PulseChannel& p, int channel);
   u8 pulse_output(const PulseChannel& p) const;
-  float mix() const;                    // combine pulse outputs
+  u8 triangle_output() const;
+  u8 noise_output() const;
+  float mix() const;
 
   PulseChannel pulse_[2];
+  TriangleChannel triangle_;
+  NoiseChannel noise_;
 
   // frame counter
   // $4017 controls mode (bit 7) and IRQ inhibit (bit 6)
@@ -124,7 +162,12 @@ class Apu {
 
   // pulse mixer lookup (precomputed, indexed by pulse1+pulse2 = 0..30)
   static constexpr int pulse_mix_size = 31;
-  static const float* pulse_mix_table(); // returns pointer to 31-entry table
+  static const float* pulse_mix_table();
+
+  // noise period table NTSC (index 0-15 from $400E)
+  static constexpr u16 noise_period_table[16] = {
+    4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068
+  };
 
   // controller I/O
   u8 joy_shift_[2]{};      // controller shift registers

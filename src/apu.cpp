@@ -41,10 +41,11 @@ int Apu::drain_samples(float* buf, int max) {
 u8 Apu::cpu_read(u16 addr) {
   switch (addr) {
     case 0x4015: {
-      // $4015 read: length counter status
       u8 status = 0;
       if (pulse_[0].length > 0) status |= 0x01;
       if (pulse_[1].length > 0) status |= 0x02;
+      if (triangle_.length > 0) status |= 0x04;
+      if (noise_.length > 0) status |= 0x08;
       return status;
     }
     case 0x4016: {  // controller 1
@@ -111,12 +112,52 @@ void Apu::cpu_write(u16 addr, u8 value) {
       break;
     }
 
+    // triangle ($4008-$400B)
+    case 0x4008:
+      triangle_.linear_control = (value & 0x80) != 0;
+      triangle_.linear_reload = value & 0x7F;
+      break;
+    case 0x4009:
+      break;
+    case 0x400A:
+      triangle_.timer_period = (triangle_.timer_period & 0x0700) | value;
+      break;
+    case 0x400B:
+      triangle_.timer_period = (triangle_.timer_period & 0x00FF) | (static_cast<u16>(value & 0x07) << 8);
+      if (triangle_.enabled)
+        triangle_.length = length_table[(value >> 3) & 0x1F];
+      triangle_.linear_reload_flag = true;
+      break;
+
+    // noise ($400C-$400F)
+    case 0x400C: {
+      noise_.env_loop = (value & 0x20) != 0;
+      noise_.constant_vol = (value & 0x10) != 0;
+      noise_.env_period = value & 0x0F;
+      break;
+    }
+    case 0x400D:
+      break;
+    case 0x400E:
+      noise_.mode = (value & 0x80) != 0;
+      noise_.timer_period = noise_period_table[value & 0x0F];
+      break;
+    case 0x400F:
+      if (noise_.enabled)
+        noise_.length = length_table[(value >> 3) & 0x1F];
+      noise_.env_start = true;
+      break;
+
     // $4015: channel enable
     case 0x4015:
       pulse_[0].enabled = (value & 0x01) != 0;
       pulse_[1].enabled = (value & 0x02) != 0;
+      triangle_.enabled = (value & 0x04) != 0;
+      noise_.enabled = (value & 0x08) != 0;
       if (!pulse_[0].enabled) pulse_[0].length = 0;
       if (!pulse_[1].enabled) pulse_[1].length = 0;
+      if (!triangle_.enabled) triangle_.length = 0;
+      if (!noise_.enabled) noise_.length = 0;
       break;
 
     // $4016: controller strobe
@@ -196,8 +237,7 @@ void Apu::tick() {
   if (do_quarter) quarter_frame();
   if (do_half)    half_frame();
 
-  // pulse timers are clocked every 2 CPU cycles (APU clock = CPU / 2)
-  // use bit 0 of the frame counter for the divider
+  // pulse timers clocked every 2 CPU cycles
   if ((frame_counter_ & 1) == 0) {
     for (int ch = 0; ch < 2; ++ch) {
       auto& p = pulse_[ch];
@@ -208,6 +248,25 @@ void Apu::tick() {
         --p.timer;
       }
     }
+  }
+
+  // triangle timer clocked every CPU cycle (only advance sequencer when audible)
+  if (triangle_.timer == 0) {
+    triangle_.timer = triangle_.timer_period;
+    if (triangle_.linear_counter > 0 && triangle_.length > 0)
+      triangle_.sequencer_pos = (triangle_.sequencer_pos + 1) & 0x1F;
+  } else {
+    --triangle_.timer;
+  }
+
+  // noise timer clocked every CPU cycle
+  if (noise_.timer == 0) {
+    noise_.timer = noise_.timer_period;
+    int feedback = (noise_.lfsr & 1) ^ (noise_.mode ? ((noise_.lfsr >> 6) & 1) : ((noise_.lfsr >> 1) & 1));
+    noise_.lfsr = (noise_.lfsr >> 1) | (static_cast<u16>(feedback) << 14);
+    if (noise_.lfsr == 0) noise_.lfsr = 1;  // 15-bit, never zero
+  } else {
+    --noise_.timer;
   }
 
   // downsample: emit one audio sample every sample_period_ CPU cycles
@@ -223,11 +282,15 @@ void Apu::tick() {
 void Apu::quarter_frame() {
   clock_envelope(pulse_[0]);
   clock_envelope(pulse_[1]);
+  clock_linear_counter();
+  clock_envelope(noise_);
 }
 
 void Apu::half_frame() {
   clock_length(pulse_[0]);
   clock_length(pulse_[1]);
+  clock_length(triangle_);
+  clock_length(noise_);
   clock_sweep(pulse_[0], 0);
   clock_sweep(pulse_[1], 1);
 }
@@ -253,6 +316,45 @@ void Apu::clock_envelope(PulseChannel& p) {
 void Apu::clock_length(PulseChannel& p) {
   if (p.length > 0 && !p.env_loop)
     --p.length;
+}
+
+void Apu::clock_envelope(NoiseChannel& n) {
+  if (n.env_start) {
+    n.env_start = false;
+    n.env_decay = 15;
+    n.env_divider = n.env_period;
+  } else {
+    if (n.env_divider == 0) {
+      n.env_divider = n.env_period;
+      if (n.env_decay > 0)
+        --n.env_decay;
+      else if (n.env_loop)
+        n.env_decay = 15;
+    } else {
+      --n.env_divider;
+    }
+  }
+}
+
+void Apu::clock_length(TriangleChannel& t) {
+  if (t.length > 0 && !t.linear_control)
+    --t.length;
+}
+
+void Apu::clock_length(NoiseChannel& n) {
+  if (n.length > 0 && !n.env_loop)
+    --n.length;
+}
+
+void Apu::clock_linear_counter() {
+  // step 1: reload or decrement
+  if (triangle_.linear_reload_flag)
+    triangle_.linear_counter = triangle_.linear_reload;
+  else if (triangle_.linear_counter > 0)
+    --triangle_.linear_counter;
+  // step 2: if control flag clear, clear reload flag
+  if (!triangle_.linear_control)
+    triangle_.linear_reload_flag = false;
 }
 
 void Apu::clock_sweep(PulseChannel& p, int channel) {
@@ -300,10 +402,35 @@ u8 Apu::pulse_output(const PulseChannel& p) const {
   return p.volume();
 }
 
+u8 Apu::triangle_output() const {
+  if (!triangle_.enabled || triangle_.length == 0 || triangle_.linear_counter == 0)
+    return 0;
+  if (triangle_.timer_period < 2)
+    return 0;  // mute ultrasonic frequencies to prevent aliasing
+  return triangle_.sequencer_pos < 16 ? (15 - triangle_.sequencer_pos) : (triangle_.sequencer_pos - 16);
+}
+
+u8 Apu::noise_output() const {
+  if (!noise_.enabled || noise_.length == 0)
+    return 0;
+  if (noise_.lfsr & 1)
+    return 0;  // output 0 when bit 0 is set
+  return noise_.volume();
+}
+
 float Apu::mix() const {
+  // pulse group: 95.88 / (8128 / (p1+p2) + 100)
   int p1 = pulse_output(pulse_[0]);
   int p2 = pulse_output(pulse_[1]);
-  return pulse_mix_table()[p1 + p2];
+  float pulse_out = pulse_mix_table()[p1 + p2];
+
+  // tnd group: 159.79 / (1 / (tri/8227 + noise/12241 + dmc/22638) + 100)
+  int tri = triangle_output();
+  int noi = noise_output();
+  float tnd_sum = static_cast<float>(tri) / 8227.0f + static_cast<float>(noi) / 12241.0f;
+  float tnd_out = (tnd_sum > 0.0f) ? static_cast<float>(159.79 / (1.0 / tnd_sum + 100.0)) : 0.0f;
+
+  return pulse_out + tnd_out;
 }
 
 }  // namespace nes
