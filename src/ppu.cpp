@@ -125,15 +125,30 @@ void PPU::run_cycles(int n) {
 
 // run one PPU cycle
 void PPU::tick() {
+  const bool rendering = (mask_ & 0x18) != 0;  // bg or sprites enabled
+
+  // pre-render scanline (261): clear VBL, sprite 0 hit, sprite overflow at dot 1
+  if (scanline_ == 261 && cycle_ == 1)
+    status_ &= ~0xE0;
+
+  // pre-render scanline: copy vertical scroll bits from T to V (dots 280-304)
+  if (scanline_ == 261 && cycle_ >= 280 && cycle_ <= 304 && rendering)
+    v_ = (v_ & ~0x7BE0) | (t_ & 0x7BE0);
+
   if (scanline_ == kVblankScanline && cycle_ == 1) {  // start of vblank (scanline 241, dot 1)
-    status_ |= 0x80;  // update vblank bit in PPUSTATUS
+    status_ |= 0x80;  // set vblank flag in PPUSTATUS
     if (ctrl_ & 0x80)    // if Vblank NMI enabled (PPUCTRL bit 7)
       nmi_pending_ = true;
   }
 
-  if (cycle_ == 0 && scanline_ >= 0 && scanline_ < fb_height) {
-    render_scanline();  // start new scanline
-  }
+  if (cycle_ == 0 && scanline_ >= 0 && scanline_ < fb_height)
+    render_scanline();
+
+  // visible scanlines: copy horizontal scroll bits from T to V at dot 257
+  // coarse X and nametable X bit reload from t each scanline
+  if (scanline_ < fb_height && cycle_ == 257 && rendering)
+    v_ = (v_ & ~0x041F) | (t_ & 0x041F);
+
   ++cycle_;
   if (cycle_ >= kCyclesPerScanline) {  // end of scanline
     cycle_ = 0;
@@ -147,49 +162,140 @@ void PPU::tick() {
 
 void PPU::render_scanline() {
   const int sy = scanline_;
-  // read t for scroll base for the frame
-  const u16 coarse_x = t_ & 0x1F;        // bits 0-4
-  const u16 coarse_y = (t_ >> 5) & 0x1F; // bits 5-9
-  const u16 nt_x = (t_ >> 10) & 0x01;    // bit  10
-  const u16 nt_y = (t_ >> 11) & 0x01;    // bit  11
-  const u16 fine_y = (t_ >> 12) & 0x07;  // bits 12-14
-  const int chr_base = (ctrl_ & 0x10) == 0 ? 0 : 0x1000;  // background pattern table address (0: $0000; 1: $1000)
   // pointer to the start of pixel row for current scanline
   u8* row = framebuffer_.data() + static_cast<std::size_t>(sy * fb_width * fb_bytes_per_pixel);
-  // render each pixel in the scanline starting from leftmost
-  for (int sx = 0; sx < fb_width; ++sx) {
-    const int world_x = (coarse_x * 8) + x_ + sx;      // world pixel column (0-255)
-    const int world_y = (coarse_y * 8) + fine_y + sy;  // world pixel row (0-239)
-    const int tx = (world_x / 8) & 0x1F;  // tile column within nametable (0-31)
-    const int ty = (world_y / 8) % 30;    // tile row within nametable (0-29)
-    const int atx = tx / 4;               // attribute table column within tile (0-7)
-    const int aty = ty / 4;               // attribute table row within tile (0-7)
-    const int px = world_x & 0x07;        // pixel column within tile (0-7)
-    const int py = world_y & 0x07;        // pixel row within tile (0-7)
-    // determine VRAM address offset to base row of current nametable (0 or 1024)
-    const int nt_base_row = 1024 * (mirror_vertical_ ?
-              (nt_x + (world_x / 256)) & 0x01 :  // vertical mirror: nametable X (0 or 1)
-              (nt_y + (world_y / 240)) & 0x01);  // horizontal mirror: nametable Y (0 or 1)
+  bool bg_opaque[fb_width]{};  // track opaque bg pixels for sprite priority / sprite 0 hit
 
-    const u8 tile_index = vram_[nt_base_row + ty * 32 + tx];  // tile index (0-255) within nametable
-    const u8 attr = vram_[nt_base_row + 0x3C0 + aty * 8 + atx];  // attribute byte within attribute table
-    const int shift = ((ty / 2) & 0x01) * 4 + ((tx / 2) & 0x01) * 2;  // shift for palette index
-    const u8 pal_bits = (attr >> shift) & 0x03;  // palette index (0-3)
+  // --- background ---
+  if (mask_ & 0x08) {  // PPUMASK bit 3: background enable
+    // read scroll state from v (maintained by tick() via T→V copies)
+    const u16 coarse_x = v_ & 0x1F;        // bits 0-4
+    const u16 coarse_y = (v_ >> 5) & 0x1F; // bits 5-9
+    const u16 nt_x = (v_ >> 10) & 0x01;    // bit  10
+    const u16 nt_y = (v_ >> 11) & 0x01;    // bit  11
+    const u16 fine_y = (v_ >> 12) & 0x07;  // bits 12-14
+    const int chr_base = (ctrl_ & 0x10) ? 0x1000 : 0;  // PPUCTRL bit 4: bg pattern table address (0: $0000; 1: $1000)
 
-    u8 color_index = 0;
-    if (chr_ && chr_size_ >= 8192) {  // if CHR ROM is present
-      const int tile_off = (chr_base + tile_index * 16);
-      const u8 lo = chr_[tile_off + py];  // low byte of tile data
-      const u8 hi = chr_[tile_off + py + 8];  // high byte of tile data
-      const u8 bit = 7 - px;  // bit index within tile (0-7)
-      color_index = ((lo >> bit) & 0x01) | (((hi >> bit) & 0x01) << 1);  // color index (0-3)
+    // render each pixel in the scanline starting from leftmost
+    for (int sx = 0; sx < fb_width; ++sx) {
+      const int world_x = (coarse_x * 8) + x_ + sx;      // world pixel column (0-255)
+      const int world_y = (coarse_y * 8) + fine_y + sy;  // world pixel row (0-239)
+      const int tx = (world_x / 8) & 0x1F;  // tile column within nametable (0-31)
+      const int ty = (world_y / 8) % 30;    // tile row within nametable (0-29)
+      const int atx = tx / 4;               // attribute table column within tile (0-7)
+      const int aty = ty / 4;               // attribute table row within tile (0-7)
+      const int px = world_x & 0x07;        // pixel column within tile (0-7)
+      const int py = world_y & 0x07;        // pixel row within tile (0-7)
+      // determine VRAM address offset to base row of current nametable (0 or 1024)
+      const int nt_base_row = 1024 * (mirror_vertical_ ?
+                  (nt_x + (world_x / 256)) & 0x01 :  // vertical mirror: nametable X (0 or 1)
+                  (nt_y + (world_y / 240)) & 0x01);  // horizontal mirror: nametable Y (0 or 1)
+
+      const u8 tile_index = vram_[nt_base_row + ty * 32 + tx];  // tile index (0-255) within nametable
+      const u8 attr = vram_[nt_base_row + 0x3C0 + aty * 8 + atx];  // attribute byte within attribute table
+      const int shift = ((ty / 2) & 0x01) * 4 + ((tx / 2) & 0x01) * 2;  // shift for palette index
+      const u8 pal_bits = (attr >> shift) & 0x03;  // palette index (0-3)
+
+      u8 color_index = 0;
+      if (chr_ && chr_size_ > 0) {  // if CHR ROM is present
+        const int tile_off = chr_base + tile_index * 0x10;
+        const u8 lo = chr_[tile_off % chr_size_ + py];        // low byte of tile row
+        const u8 hi = chr_[(tile_off + 0x08) % chr_size_ + py];  // high byte of tile row
+        const u8 bit = 7 - px;                                 // bit index within tile row
+        color_index = ((lo >> bit) & 0x01) | (((hi >> bit) & 0x01) << 1);  // 2-bit color (0-3)
+      }
+
+      bg_opaque[sx] = (color_index != 0);
+      const u8 pal_idx = (pal_bits << 2) | color_index;   // palette index (0-15)
+      const u8 ppu_color = nes_palette(pal_idx);           // NES color (0-63)
+      const u8* rgb = kPalette[ppu_color & 0x3F];          // RGB from NES palette LUT
+      row[sx * 3 + 0] = rgb[0];  // red
+      row[sx * 3 + 1] = rgb[1];  // green
+      row[sx * 3 + 2] = rgb[2];  // blue
     }
-    const u8 pal_idx = (pal_bits << 2) | color_index;  // palette index (0-15)
-    const u8 ppu_color = nes_palette(pal_idx);  // color index (0-63)
-    const u8* rgb = kPalette[ppu_color & 0x3F];  // RGB color from NES palette
-    row[sx * 3 + 0] = rgb[0];  // red
-    row[sx * 3 + 1] = rgb[1];  // green
-    row[sx * 3 + 2] = rgb[2];  // blue
+  } else {
+    // background disabled: fill with backdrop color
+    const u8 ppu_color = palette_ram_[0] & 0x3F;
+    const u8* rgb = kPalette[ppu_color];
+    for (int sx = 0; sx < fb_width; ++sx) {
+      row[sx * 3 + 0] = rgb[0];
+      row[sx * 3 + 1] = rgb[1];
+      row[sx * 3 + 2] = rgb[2];
+    }
+  }
+
+  // --- sprites ---
+  if (!(mask_ & 0x10))  // PPUMASK bit 4: sprite enable
+    return;
+  if (!chr_ || chr_size_ == 0)
+    return;
+
+  const int spr_height = (ctrl_ & 0x20) ? 16 : 8;        // PPUCTRL bit 5: sprite size (0: 8x8; 1: 8x16)
+  const int spr_chr_base = (ctrl_ & 0x08) ? 0x1000 : 0;  // PPUCTRL bit 3: sprite pattern table (8x8 only)
+
+  // collect up to 8 sprites that overlap this scanline (OAM order = priority order)
+  // OAM: 64 sprites, 4 bytes each: [Y, tile, attr, X]
+  int spr_idx[8];
+  int spr_count = 0;
+  for (int i = 0; i < 64 && spr_count < 8; ++i) {
+    const int spr_y = oam_[i * 4];                  // byte 0: Y position (sprite appears at Y+1)
+    const int row_in_spr = sy - (spr_y + 1);        // row within sprite (0 to spr_height-1)
+    if (row_in_spr >= 0 && row_in_spr < spr_height)
+      spr_idx[spr_count++] = i;
+  }
+
+  // render in reverse order so lower OAM index (higher priority) is drawn last
+  for (int s = spr_count - 1; s >= 0; --s) {
+    const int i = spr_idx[s];
+    const u8 spr_y  = oam_[i * 4 + 0];              // byte 0: Y position
+    const u8 tile   = oam_[i * 4 + 1];              // byte 1: tile index
+    const u8 attr   = oam_[i * 4 + 2];              // byte 2: attributes
+    const u8 spr_x  = oam_[i * 4 + 3];              // byte 3: X position
+    const u8 spr_pal = (attr & 0x03) + 4;           // attr bits 0-1: palette (4-7 for sprites)
+    const bool behind_bg = (attr & 0x20) != 0;      // attr bit 5: priority (0: front; 1: behind bg)
+    const bool flip_h    = (attr & 0x40) != 0;      // attr bit 6: flip horizontally
+    const bool flip_v    = (attr & 0x80) != 0;      // attr bit 7: flip vertically
+
+    int py = sy - (spr_y + 1);                      // row within sprite
+    if (flip_v) py = spr_height - 1 - py;
+
+    // compute CHR address for this sprite row
+    int tile_addr;
+    if (spr_height == 16) {
+      // 8x16: tile bit 0 selects pattern table ($0000 or $1000), tile & $FE is top tile
+      const int bank = (tile & 0x01) ? 0x1000 : 0;
+      int tile_num = tile & 0xFE;
+      if (py >= 8) { tile_num++; py -= 8; }         // bottom half of 8x16 sprite
+      tile_addr = bank + tile_num * 0x10 + py;
+    } else {
+      // 8x8: use PPUCTRL bit 3 for pattern table
+      tile_addr = spr_chr_base + tile * 0x10 + py;
+    }
+
+    const u8 lo = chr_[tile_addr % chr_size_];              // low byte of tile row
+    const u8 hi = chr_[(tile_addr + 0x08) % chr_size_];     // high byte of tile row
+
+    for (int bit = 0; bit < 8; ++bit) {
+      const int sx = spr_x + bit;
+      if (sx >= fb_width) break;
+
+      const int shift = flip_h ? bit : (7 - bit);           // flip selects bit order
+      const u8 color_idx = ((lo >> shift) & 0x01) | (((hi >> shift) & 0x01) << 1);  // 2-bit color
+      if (color_idx == 0) continue;                          // transparent pixel
+
+      // sprite 0 hit: opaque sprite 0 pixel overlaps opaque bg pixel (not at x=255)
+      if (i == 0 && bg_opaque[sx] && sx < 255)
+        status_ |= 0x40;
+
+      if (behind_bg && bg_opaque[sx]) continue;             // behind opaque background
+
+      const u8 pal_idx = (spr_pal << 2) | color_idx;       // sprite palette index
+      const u8 ppu_color = nes_palette(pal_idx);            // NES color (0-63)
+      const u8* rgb = kPalette[ppu_color & 0x3F];           // RGB from NES palette LUT
+      row[sx * 3 + 0] = rgb[0];  // red
+      row[sx * 3 + 1] = rgb[1];  // green
+      row[sx * 3 + 2] = rgb[2];  // blue
+    }
   }
 }
 
