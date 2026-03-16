@@ -45,7 +45,7 @@ int main(int argc, char* argv[]) {
   cpu.PC = reset_lo | (reset_hi << 8);
   cpu.S = 0xFD;
   cpu.P = nes::flag::U | nes::flag::I;
-  if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
     std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
     return 1;
   }
@@ -77,6 +77,21 @@ int main(int argc, char* argv[]) {
     SDL_DestroyWindow(win);
     SDL_Quit();
     return 1;
+  }
+
+  // open audio device for APU output (44100 Hz, mono, float32, push via SDL_QueueAudio)
+  SDL_AudioSpec want{}, have{};
+  want.freq = 44100;
+  want.format = AUDIO_F32SYS;
+  want.channels = 1;
+  want.samples = 512;
+  want.callback = nullptr;
+  SDL_AudioDeviceID audio_dev = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+  if (audio_dev == 0) {
+    std::fprintf(stderr, "SDL_OpenAudioDevice failed: %s\n", SDL_GetError());
+  } else {
+    apu.set_sample_rate(have.freq);
+    SDL_PauseAudioDevice(audio_dev, 0);
   }
 
   std::printf("Loaded %s (mapper %d, PRG %zu bytes, CHR %zu bytes)\n",
@@ -128,12 +143,14 @@ int main(int argc, char* argv[]) {
       cycles += 513 + (total_cpu_cycles & 1);           // 513 cycles (+1 on odd CPU cycle)
     total_cpu_cycles += cycles;
     ppu.run_cycles(3 * cycles);                         // 3 PPU cycles per CPU cycle
+    apu.run_cycles(cycles);                             // APU runs at CPU clock
 
     // NMI is sampled between instructions (PPU may have set it during the ticks above)
     if (ppu.take_nmi_pending()) {
       int nmi_cycles = cpu.nmi();
       total_cpu_cycles += nmi_cycles;
       ppu.run_cycles(3 * nmi_cycles);
+      apu.tick(nmi_cycles);
     }
 
     if (ppu.frame_ready()) {                // new frame finished: upload fb and present
@@ -150,6 +167,14 @@ int main(int argc, char* argv[]) {
       SDL_RenderCopy(ren, tex, nullptr, nullptr);
       SDL_RenderPresent(ren);
 
+      // drain APU sample buffer and queue for playback
+      if (audio_dev != 0) {
+        float samples[2048];
+        int n;
+        while ((n = apu.drain_samples(samples, 2048)) > 0)
+          SDL_QueueAudio(audio_dev, samples, static_cast<Uint32>(n * sizeof(float)));
+      }
+
       // wait until next frame boundary (~16.64ms per frame)
       const Uint64 target_ticks = static_cast<Uint64>(target_frame_sec * perf_freq);
       Uint64 elapsed = SDL_GetPerformanceCounter() - frame_start;
@@ -164,6 +189,8 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  if (audio_dev != 0)
+    SDL_CloseAudioDevice(audio_dev);
   SDL_DestroyTexture(tex);
   SDL_DestroyRenderer(ren);
   SDL_DestroyWindow(win);
