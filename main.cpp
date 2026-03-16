@@ -83,6 +83,11 @@ int main(int argc, char* argv[]) {
               path.c_str(), cart.mapper, cart.prg_size, cart.chr_size);
   std::printf("Reset vector: $%04X\n", cpu.PC);
 
+  // NTSC frame timing (~60.0988 Hz)
+  constexpr double target_frame_sec = 1.0 / 60.0988;
+  const Uint64 perf_freq = SDL_GetPerformanceFrequency();
+  Uint64 frame_start = SDL_GetPerformanceCounter();
+
   bool quit = false;
   long total_cpu_cycles = 0;
   while (!quit) {
@@ -132,6 +137,18 @@ int main(int argc, char* argv[]) {
       SDL_RenderClear(ren);
       SDL_RenderCopy(ren, tex, nullptr, nullptr);
       SDL_RenderPresent(ren);
+
+      // wait until next frame boundary (~16.64ms per frame)
+      const Uint64 target_ticks = static_cast<Uint64>(target_frame_sec * perf_freq);
+      Uint64 elapsed = SDL_GetPerformanceCounter() - frame_start;
+      if (elapsed < target_ticks) {
+        double remaining = static_cast<double>(target_ticks - elapsed) / perf_freq;
+        if (remaining > 0.001)
+          SDL_Delay(static_cast<Uint32>(remaining * 1000.0));
+        while (SDL_GetPerformanceCounter() - frame_start < target_ticks)
+          ;  // spin for sub-millisecond precision
+      }
+      frame_start = SDL_GetPerformanceCounter();
     }
   }
 
