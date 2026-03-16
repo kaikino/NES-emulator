@@ -178,6 +178,7 @@ int CPU::step() {
   // instruction helpers
 
   auto do_adc = [this](u8 m) {
+    // decimal mode (optional for NES)
     if (P & flag::D) {
       u16 sum = A + m + (get_C() ? 1 : 0);
       set_V(((A ^ sum) & (m ^ sum) & 0x80) != 0);
@@ -189,15 +190,16 @@ int CPU::step() {
       A = static_cast<u8>((hi << 4) | (lo & 0x0F));
       set_NZ(A);
     } else {
-      u16 sum = A + m + (get_C() ? 1 : 0);
-      set_V(((A ^ sum) & (m ^ sum) & 0x80) != 0);
-      set_C(sum > 0xFF);
+      u16 sum = A + m + (get_C() ? 1 : 0);         // A = A + memory + C
+      set_V(((A ^ sum) & (m ^ sum) & 0x80) != 0);  // overflow: (result ^ A) & (result ^ memory) & $80
+      set_C(sum > 0xFF);                           // carry: result > $FF
       A = static_cast<u8>(sum);
-      set_NZ(A);
+      set_NZ(A);                                   // negative: result bit 7; zero: result == 0
     }
   };
 
   auto do_sbc = [this](u8 m) {
+    // decimal mode (optional for NES)
     if (P & flag::D) {
       u16 sub = static_cast<u16>(A) - m - (get_C() ? 0 : 1);
       set_V(((A ^ static_cast<u8>(sub)) & (A ^ m) & 0x80) != 0);
@@ -211,11 +213,11 @@ int CPU::step() {
       A = static_cast<u8>((hi << 4) | lo);
       set_NZ(A);
     } else {
-      u16 sub = static_cast<u16>(A) - m - (get_C() ? 0 : 1);
-      set_V(((A ^ static_cast<u8>(sub)) & (A ^ m) & 0x80) != 0);
-      set_C(sub < 0x100);
+      u16 sub = static_cast<u16>(A) - m - (get_C() ? 0 : 1);      // A = A - memory - ~C
+      set_V(((A ^ static_cast<u8>(sub)) & (A ^ m) & 0x80) != 0);  // overflow: (result ^ A) & (result ^ ~memory) & $80
+      set_C(sub < 0x100);                                         // carry: ~(result < $00)
       A = static_cast<u8>(sub);
-      set_NZ(A);
+      set_NZ(A);                                                  // negative: result bit 7; zero: result == 0
     }
   };
 
@@ -225,36 +227,57 @@ int CPU::step() {
       return;
     }
     cycles = 3;
-    if ((PC & 0xFF00) != (target & 0xFF00)) cycles++;
+    if ((PC & 0xFF00) != (target & 0xFF00)) cycles++; // page crossed
     PC = target;
   };
 
   auto do_compare = [this](u8 reg_val, u8 m) {
-    set_C(reg_val >= m);
-    set_NZ(static_cast<u8>(reg_val - m));
+    set_C(reg_val >= m);                   // carry: A >= memory
+    set_NZ(static_cast<u8>(reg_val - m));  // negative: result bit 7; zero: A == 0
   };
 
   auto do_load = [this](u8& reg, u8 value) {
-    reg = value;
-    set_NZ(reg);
+    reg = value;  // A = memory
+    set_NZ(reg);  // negative: result bit 7; zero: result == 0
   };
 
   auto do_alu = [this](u8 m, auto op) {
-    A = op(A, m);
-    set_NZ(A);
+    A = op(A, m);  // XOR, OR, AND
+    set_NZ(A);     // negative: result bit 7; zero: result == 0
   };
 
   auto do_rmw_mem = [this](u16 addr, auto transform) {
     u8 v = read(addr);
     v = transform(v);
     write(addr, v);
-    set_NZ(v);
+    set_NZ(v);     // negative: result bit 7; zero: result == 0
   };
 
+  // lambda functions for RMW opeartions
+  auto rmw_asl = [this](u8 v) { set_C((v & 0x80) != 0); return static_cast<u8>(v << 1); };
+  auto rmw_lsr = [this](u8 v) { set_C((v & 0x01) != 0); return static_cast<u8>(v >> 1); };
+  auto rmw_rol = [this](u8 v) {
+    u8 c = get_C() ? 1 : 0;
+    set_C((v & 0x80) != 0);
+    return static_cast<u8>((v << 1) | c);
+  };
+  auto rmw_ror = [this](u8 v) {
+    u8 c = get_C() ? 0x80 : 0;
+    set_C((v & 0x01) != 0);
+    return static_cast<u8>((v >> 1) | c);
+  };
+  auto rmw_inc = [](u8 v) { return v + 1; };
+  auto rmw_dec = [](u8 v) { return v - 1; };
+
+  // lambda helpers for ALU operations
+  auto alu_and = [](u8 a, u8 b) { return static_cast<u8>(a & b); };
+  auto alu_or = [](u8 a, u8 b) { return static_cast<u8>(a | b); };
+  auto alu_eor = [](u8 a, u8 b) { return static_cast<u8>(a ^ b); };
+
   auto do_bit = [this](u8 m) {
-    set_Z((A & m) == 0);
-    set_N((m & 0x80) != 0);
-    set_V((m & 0x40) != 0);
+    set_Z((A & m) == 0);     // zero: A & memory == 0
+    set_N((m & 0x80) != 0);  // negative: memory bit 7
+    set_V((m & 0x40) != 0);  // overflow: memory bit 6
   };
 
   // instructions
@@ -270,42 +293,36 @@ int CPU::step() {
     case 0x61: do_adc(read(indx())); cycles = 6; break;
     case 0x71: do_adc(read(indy())); cycles = 5 + (page_crossed ? 1 : 0); break;
     // AND - Bitwise AND
-    case 0x29: do_alu(imm(), [](u8 a, u8 b) { return a & b; }); cycles = 2; break;
-    case 0x25: do_alu(read(zp()), [](u8 a, u8 b) { return a & b; }); cycles = 3; break;
-    case 0x35: do_alu(read(zpx()), [](u8 a, u8 b) { return a & b; }); cycles = 4; break;
-    case 0x2D: do_alu(read(abs()), [](u8 a, u8 b) { return a & b; }); cycles = 4; break;
-    case 0x3D: do_alu(read(absx()), [](u8 a, u8 b) { return a & b; }); cycles = 4 + (page_crossed ? 1 : 0); break;
-    case 0x39: do_alu(read(absy()), [](u8 a, u8 b) { return a & b; }); cycles = 4 + (page_crossed ? 1 : 0); break;
-    case 0x21: do_alu(read(indx()), [](u8 a, u8 b) { return a & b; }); cycles = 6; break;
-    case 0x31: do_alu(read(indy()), [](u8 a, u8 b) { return a & b; }); cycles = 5 + (page_crossed ? 1 : 0); break;
+    case 0x29: do_alu(imm(), alu_and); cycles = 2; break;
+    case 0x25: do_alu(read(zp()), alu_and); cycles = 3; break;
+    case 0x35: do_alu(read(zpx()), alu_and); cycles = 4; break;
+    case 0x2D: do_alu(read(abs()), alu_and); cycles = 4; break;
+    case 0x3D: do_alu(read(absx()), alu_and); cycles = 4 + (page_crossed ? 1 : 0); break;
+    case 0x39: do_alu(read(absy()), alu_and); cycles = 4 + (page_crossed ? 1 : 0); break;
+    case 0x21: do_alu(read(indx()), alu_and); cycles = 6; break;
+    case 0x31: do_alu(read(indy()), alu_and); cycles = 5 + (page_crossed ? 1 : 0); break;
     // ASL - Arithmetic Shift Left
-    case 0x0A: {
-      set_C((A & 0x80) != 0);
-      A = static_cast<u8>(A << 1);
-      set_NZ(A);
-      cycles = 2;
-      break;
-    }
-    case 0x06: do_rmw_mem(zp(), [this](u8 v) { set_C((v & 0x80) != 0); return static_cast<u8>(v << 1); }); cycles = 5; break;
-    case 0x16: do_rmw_mem(zpx(), [this](u8 v) { set_C((v & 0x80) != 0); return static_cast<u8>(v << 1); }); cycles = 6; break;
-    case 0x0E: do_rmw_mem(abs(), [this](u8 v) { set_C((v & 0x80) != 0); return static_cast<u8>(v << 1); }); cycles = 6; break;
-    case 0x1E: do_rmw_mem(absx(), [this](u8 v) { set_C((v & 0x80) != 0); return static_cast<u8>(v << 1); }); cycles = 7; break;
+    case 0x0A: A = rmw_asl(A); set_NZ(A); cycles = 2; break;
+    case 0x06: do_rmw_mem(zp(), rmw_asl); cycles = 5; break;
+    case 0x16: do_rmw_mem(zpx(), rmw_asl); cycles = 6; break;
+    case 0x0E: do_rmw_mem(abs(), rmw_asl); cycles = 6; break;
+    case 0x1E: do_rmw_mem(absx(), rmw_asl); cycles = 7; break;
     // BCC - Branch if Carry Clear
-    case 0x90: { u16 t = rel(); do_branch(!get_C(), t); break; }
+    case 0x90: do_branch(!get_C(), rel()); break;
     // BCS - Branch if Carry Set
-    case 0xB0: { u16 t = rel(); do_branch(get_C(), t); break; }
+    case 0xB0: do_branch(get_C(), rel()); break;
     // BEQ - Branch if Equal
-    case 0xF0: { u16 t = rel(); do_branch((P & flag::Z) != 0, t); break; }
+    case 0xF0: do_branch((P & flag::Z) != 0, rel()); break;
     // BMI - Branch if Minus
-    case 0x30: { u16 t = rel(); do_branch((P & flag::N) != 0, t); break; }
+    case 0x30: do_branch((P & flag::N) != 0, rel()); break;
     // BNE - Branch if Not Equal
-    case 0xD0: { u16 t = rel(); do_branch((P & flag::Z) == 0, t); break; }
+    case 0xD0: do_branch((P & flag::Z) == 0, rel()); break;
     // BPL - Branch if Plus
-    case 0x10: { u16 t = rel(); do_branch((P & flag::N) == 0, t); break; }
+    case 0x10: do_branch((P & flag::N) == 0, rel()); break;
     // BVC - Branch if Overflow Clear
-    case 0x50: { u16 t = rel(); do_branch((P & flag::V) == 0, t); break; }
+    case 0x50: do_branch((P & flag::V) == 0, rel()); break;
     // BVS - Branch if Overflow Set
-    case 0x70: { u16 t = rel(); do_branch((P & flag::V) != 0, t); break; }
+    case 0x70: do_branch((P & flag::V) != 0, rel()); break;
     // BIT - Bit Test
     case 0x24: do_bit(read(zp())); cycles = 3; break;
     case 0x2C: do_bit(read(abs())); cycles = 4; break;
@@ -346,28 +363,28 @@ int CPU::step() {
     case 0xC4: do_compare(Y, read(zp())); cycles = 3; break;
     case 0xCC: do_compare(Y, read(abs())); cycles = 4; break;
     // DEC - Decrement Memory
-    case 0xC6: do_rmw_mem(zp(), [](u8 v) { return v - 1; }); cycles = 5; break;
-    case 0xD6: do_rmw_mem(zpx(), [](u8 v) { return v - 1; }); cycles = 6; break;
-    case 0xCE: do_rmw_mem(abs(), [](u8 v) { return v - 1; }); cycles = 6; break;
-    case 0xDE: do_rmw_mem(absx(), [](u8 v) { return v - 1; }); cycles = 7; break;
+    case 0xC6: do_rmw_mem(zp(), rmw_dec); cycles = 5; break;
+    case 0xD6: do_rmw_mem(zpx(), rmw_dec); cycles = 6; break;
+    case 0xCE: do_rmw_mem(abs(), rmw_dec); cycles = 6; break;
+    case 0xDE: do_rmw_mem(absx(), rmw_dec); cycles = 7; break;
     // DEX - Decrement X
     case 0xCA: X--; set_NZ(X); cycles = 2; break;
     // DEY - Decrement Y
     case 0x88: Y--; set_NZ(Y); cycles = 2; break;
     // EOR - Bitwise Exclusive OR
-    case 0x49: do_alu(imm(), [](u8 a, u8 b) { return a ^ b; }); cycles = 2; break;
-    case 0x45: do_alu(read(zp()), [](u8 a, u8 b) { return a ^ b; }); cycles = 3; break;
-    case 0x55: do_alu(read(zpx()), [](u8 a, u8 b) { return a ^ b; }); cycles = 4; break;
-    case 0x4D: do_alu(read(abs()), [](u8 a, u8 b) { return a ^ b; }); cycles = 4; break;
-    case 0x5D: do_alu(read(absx()), [](u8 a, u8 b) { return a ^ b; }); cycles = 4 + (page_crossed ? 1 : 0); break;
-    case 0x59: do_alu(read(absy()), [](u8 a, u8 b) { return a ^ b; }); cycles = 4 + (page_crossed ? 1 : 0); break;
-    case 0x41: do_alu(read(indx()), [](u8 a, u8 b) { return a ^ b; }); cycles = 6; break;
-    case 0x51: do_alu(read(indy()), [](u8 a, u8 b) { return a ^ b; }); cycles = 5 + (page_crossed ? 1 : 0); break;
+    case 0x49: do_alu(imm(), alu_eor); cycles = 2; break;
+    case 0x45: do_alu(read(zp()), alu_eor); cycles = 3; break;
+    case 0x55: do_alu(read(zpx()), alu_eor); cycles = 4; break;
+    case 0x4D: do_alu(read(abs()), alu_eor); cycles = 4; break;
+    case 0x5D: do_alu(read(absx()), alu_eor); cycles = 4 + (page_crossed ? 1 : 0); break;
+    case 0x59: do_alu(read(absy()), alu_eor); cycles = 4 + (page_crossed ? 1 : 0); break;
+    case 0x41: do_alu(read(indx()), alu_eor); cycles = 6; break;
+    case 0x51: do_alu(read(indy()), alu_eor); cycles = 5 + (page_crossed ? 1 : 0); break;
     // INC - Increment Memory
-    case 0xE6: do_rmw_mem(zp(), [](u8 v) { return v + 1; }); cycles = 5; break;
-    case 0xF6: do_rmw_mem(zpx(), [](u8 v) { return v + 1; }); cycles = 6; break;
-    case 0xEE: do_rmw_mem(abs(), [](u8 v) { return v + 1; }); cycles = 6; break;
-    case 0xFE: do_rmw_mem(absx(), [](u8 v) { return v + 1; }); cycles = 7; break;
+    case 0xE6: do_rmw_mem(zp(), rmw_inc); cycles = 5; break;
+    case 0xF6: do_rmw_mem(zpx(), rmw_inc); cycles = 6; break;
+    case 0xEE: do_rmw_mem(abs(), rmw_inc); cycles = 6; break;
+    case 0xFE: do_rmw_mem(absx(), rmw_inc); cycles = 7; break;
     // INC - Increment X
     case 0xE8: X++; set_NZ(X); cycles = 2; break;
     // INC - Increment Y
@@ -407,28 +424,22 @@ int CPU::step() {
     case 0xAC: do_load(Y, read(abs())); cycles = 4; break;
     case 0xBC: do_load(Y, read(absx())); cycles = 4 + (page_crossed ? 1 : 0); break;
     // LSR - Logical Shift Right
-    case 0x4A: {
-      set_C((A & 0x01) != 0);
-      A = static_cast<u8>(A >> 1);
-      set_NZ(A);
-      cycles = 2;
-      break;
-    }
-    case 0x46: do_rmw_mem(zp(), [this](u8 v) { set_C((v & 0x01) != 0); return static_cast<u8>(v >> 1); }); cycles = 5; break;
-    case 0x56: do_rmw_mem(zpx(), [this](u8 v) { set_C((v & 0x01) != 0); return static_cast<u8>(v >> 1); }); cycles = 6; break;
-    case 0x4E: do_rmw_mem(abs(), [this](u8 v) { set_C((v & 0x01) != 0); return static_cast<u8>(v >> 1); }); cycles = 6; break;
-    case 0x5E: do_rmw_mem(absx(), [this](u8 v) { set_C((v & 0x01) != 0); return static_cast<u8>(v >> 1); }); cycles = 7; break;
+    case 0x4A: A = rmw_lsr(A); set_NZ(A); cycles = 2; break;
+    case 0x46: do_rmw_mem(zp(), rmw_lsr); cycles = 5; break;
+    case 0x56: do_rmw_mem(zpx(), rmw_lsr); cycles = 6; break;
+    case 0x4E: do_rmw_mem(abs(), rmw_lsr); cycles = 6; break;
+    case 0x5E: do_rmw_mem(absx(), rmw_lsr); cycles = 7; break;
     // NOP - No Operation
     case 0xEA: cycles = 2; break;
     // ORA - Bitwise OR
-    case 0x09: do_alu(imm(), [](u8 a, u8 b) { return a | b; }); cycles = 2; break;
-    case 0x05: do_alu(read(zp()), [](u8 a, u8 b) { return a | b; }); cycles = 3; break;
-    case 0x15: do_alu(read(zpx()), [](u8 a, u8 b) { return a | b; }); cycles = 4; break;
-    case 0x0D: do_alu(read(abs()), [](u8 a, u8 b) { return a | b; }); cycles = 4; break;
-    case 0x1D: do_alu(read(absx()), [](u8 a, u8 b) { return a | b; }); cycles = 4 + (page_crossed ? 1 : 0); break;
-    case 0x19: do_alu(read(absy()), [](u8 a, u8 b) { return a | b; }); cycles = 4 + (page_crossed ? 1 : 0); break;
-    case 0x01: do_alu(read(indx()), [](u8 a, u8 b) { return a | b; }); cycles = 6; break;
-    case 0x11: do_alu(read(indy()), [](u8 a, u8 b) { return a | b; }); cycles = 5 + (page_crossed ? 1 : 0); break;
+    case 0x09: do_alu(imm(), alu_or); cycles = 2; break;
+    case 0x05: do_alu(read(zp()), alu_or); cycles = 3; break;
+    case 0x15: do_alu(read(zpx()), alu_or); cycles = 4; break;
+    case 0x0D: do_alu(read(abs()), alu_or); cycles = 4; break;
+    case 0x1D: do_alu(read(absx()), alu_or); cycles = 4 + (page_crossed ? 1 : 0); break;
+    case 0x19: do_alu(read(absy()), alu_or); cycles = 4 + (page_crossed ? 1 : 0); break;
+    case 0x01: do_alu(read(indx()), alu_or); cycles = 6; break;
+    case 0x11: do_alu(read(indy()), alu_or); cycles = 5 + (page_crossed ? 1 : 0); break;
     // PHA - Push A
     case 0x48: push(A); cycles = 3; break;
     // PHP - Push Processor Status
@@ -438,31 +449,17 @@ int CPU::step() {
     // PLP - Pull Processor Status
     case 0x28: P = pop() & ~flag::B; P |= flag::U; cycles = 4; break;
     // ROL - Rotate Left
-    case 0x2A: {
-      u8 c = get_C() ? 1 : 0;
-      set_C((A & 0x80) != 0);
-      A = static_cast<u8>((A << 1) | c);
-      set_NZ(A);
-      cycles = 2;
-      break;
-    }
-    case 0x26: do_rmw_mem(zp(), [this](u8 v) { u8 c = get_C() ? 1 : 0; set_C((v & 0x80) != 0); return static_cast<u8>((v << 1) | c); }); cycles = 5; break;
-    case 0x36: do_rmw_mem(zpx(), [this](u8 v) { u8 c = get_C() ? 1 : 0; set_C((v & 0x80) != 0); return static_cast<u8>((v << 1) | c); }); cycles = 6; break;
-    case 0x2E: do_rmw_mem(abs(), [this](u8 v) { u8 c = get_C() ? 1 : 0; set_C((v & 0x80) != 0); return static_cast<u8>((v << 1) | c); }); cycles = 6; break;
-    case 0x3E: do_rmw_mem(absx(), [this](u8 v) { u8 c = get_C() ? 1 : 0; set_C((v & 0x80) != 0); return static_cast<u8>((v << 1) | c); }); cycles = 7; break;
+    case 0x2A: A = rmw_rol(A); set_NZ(A); cycles = 2; break;
+    case 0x26: do_rmw_mem(zp(), rmw_rol); cycles = 5; break;
+    case 0x36: do_rmw_mem(zpx(), rmw_rol); cycles = 6; break;
+    case 0x2E: do_rmw_mem(abs(), rmw_rol); cycles = 6; break;
+    case 0x3E: do_rmw_mem(absx(), rmw_rol); cycles = 7; break;
     // ROR - Rotate Right
-    case 0x6A: {
-      u8 c = get_C() ? 0x80 : 0;
-      set_C((A & 0x01) != 0);
-      A = static_cast<u8>((A >> 1) | c);
-      set_NZ(A);
-      cycles = 2;
-      break;
-    }
-    case 0x66: do_rmw_mem(zp(), [this](u8 v) { u8 c = get_C() ? 0x80 : 0; set_C((v & 0x01) != 0); return static_cast<u8>((v >> 1) | c); }); cycles = 5; break;
-    case 0x76: do_rmw_mem(zpx(), [this](u8 v) { u8 c = get_C() ? 0x80 : 0; set_C((v & 0x01) != 0); return static_cast<u8>((v >> 1) | c); }); cycles = 6; break;
-    case 0x6E: do_rmw_mem(abs(), [this](u8 v) { u8 c = get_C() ? 0x80 : 0; set_C((v & 0x01) != 0); return static_cast<u8>((v >> 1) | c); }); cycles = 6; break;
-    case 0x7E: do_rmw_mem(absx(), [this](u8 v) { u8 c = get_C() ? 0x80 : 0; set_C((v & 0x01) != 0); return static_cast<u8>((v >> 1) | c); }); cycles = 7; break;
+    case 0x6A: A = rmw_ror(A); set_NZ(A); cycles = 2; break;
+    case 0x66: do_rmw_mem(zp(), rmw_ror); cycles = 5; break;
+    case 0x76: do_rmw_mem(zpx(), rmw_ror); cycles = 6; break;
+    case 0x6E: do_rmw_mem(abs(), rmw_ror); cycles = 6; break;
+    case 0x7E: do_rmw_mem(absx(), rmw_ror); cycles = 7; break;
     // RTI - Return from Interrupt
     case 0x40: {
       P = pop() & ~flag::B;

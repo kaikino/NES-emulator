@@ -5,6 +5,8 @@
 
 namespace nes {
 
+// implements all CPU instructions
+// owns CPU registers
 class CPU {
  public:
   explicit CPU(Bus& bus);

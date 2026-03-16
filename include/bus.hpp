@@ -5,6 +5,11 @@
 
 namespace nes {
 
+class PPU;
+
+// manages CPU memory map
+// owns internal RAM, cartridge RAM/ROM
+// routes to PPU registers and APU registers
 class Bus {
  public:
   // nes_mapping == false: legacy mode (flat 64K for Klaus test).
@@ -22,9 +27,13 @@ class Bus {
   u8* ram_ptr();
   const u8* ram_ptr() const;
 
-  // For NES mapping: load PRG into cartridge region ($8000-$FFFF). Size typically 16KB or 32KB.
+  // load PRG into cartridge region ($8000-$FFFF). Size typically 16KB or 32KB.
   void load_prg(const u8* data, std::size_t size);
 
+  // attach PPU for $2000-$3FFF
+  void set_ppu(PPU* ppu) { ppu_ = ppu; }
+
+  // CPU Memory Map
   // Address range  Size     Device
   // $0000–$07FF    $0800    2 KB internal RAM
   // $0800–$0FFF    $0800    Mirrors of $0000–$07FF
@@ -47,6 +56,7 @@ class Bus {
   static constexpr std::size_t prg_rom_max = 0x8000;        // $8000-$FFFF, 32KB
 
   bool const nes_mapping_;
+  PPU* ppu_{nullptr};
   std::vector<u8> ram_{};         // legacy: 64KB flat; NES: 2KB internal ($0000-$1FFF)
   std::vector<u8> prg_ram_{};      // NES only ($6000-$7FFF)
   std::vector<u8> prg_rom_{};      // $8000-$FFFF, size set by load_prg (mirror by decode)

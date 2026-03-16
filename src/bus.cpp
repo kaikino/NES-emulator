@@ -1,4 +1,5 @@
 #include "bus.hpp"
+#include "ppu.hpp"
 
 namespace nes {
 
@@ -55,7 +56,8 @@ u8 Bus::read_nes(u16 addr) const {
     return ram_[mirror_ram(addr)];
   }
   if (addr < ppu_end) {
-    // PPU stub: open bus (return 0)
+    if (ppu_)
+      return ppu_->cpu_read(addr & 7);
     return 0;
   }
   if (addr < apu_end) {
@@ -82,7 +84,8 @@ void Bus::write_nes(u16 addr, u8 value) {
     return;
   }
   if (addr < ppu_end) {
-    // PPU stub: no-op
+    if (ppu_)
+      ppu_->cpu_write(addr & 7, value);
     return;
   }
   if (addr < apu_end) {

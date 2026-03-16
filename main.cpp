@@ -1,9 +1,13 @@
 #include "bus.hpp"
 #include "cpu.hpp"
 #include "ines.hpp"
+#include "ppu.hpp"
 #include "types.hpp"
 #include <cstdio>
+#include <cstring>
 #include <string>
+
+#include <SDL.h>
 
 int main(int argc, char* argv[]) {
   if (argc < 2) {
@@ -12,34 +16,100 @@ int main(int argc, char* argv[]) {
   }
 
   std::string path(argv[1]);
-  nes::Bus bus(true);
+  nes::Bus bus(true);  // NES memory map ($0000-$FFFF)
   nes::InesCart cart;
-  if (!nes::load_ines(path, bus, cart)) {
+  if (!nes::load_ines(path, bus, cart)) {  // parse iNES header, load PRG/CHR into bus
     std::fprintf(stderr, "Failed to load iNES ROM: %s\n", path.c_str());
     return 1;
   }
-
+  // only NROM (mapper 0) supported
   if (cart.mapper != 0) {
     std::fprintf(stderr, "Unsupported mapper %d (only NROM/mapper 0)\n", cart.mapper);
     return 1;
   }
 
+  // create PPU with CHR and mirroring; attach to bus for $2000-$3FFF
+  nes::PPU ppu(cart.chr.empty() ? nullptr : cart.chr.data(), cart.chr.size(),
+              cart.mirror_vertical);
+  bus.set_ppu(&ppu);
+
+  // create CPU; set PC from reset vector ($FFFC/$FFFD), init stack and flags
   nes::CPU cpu(bus);
   nes::u16 reset_lo = bus.read(0xFFFC);
   nes::u16 reset_hi = bus.read(0xFFFD);
   cpu.PC = reset_lo | (reset_hi << 8);
   cpu.S = 0xFD;
   cpu.P = nes::flag::U | nes::flag::I;
+  ppu.set_nmi_callback([&cpu]() { cpu.nmi(); });  // Vblank -> NMI
+
+  if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+    std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+    return 1;
+  }
+  constexpr int scale = 3;
+  SDL_Window* win = SDL_CreateWindow("NES",
+                                    SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                    nes::PPU::fb_width * scale, nes::PPU::fb_height * scale,
+                                    0);
+  if (!win) {
+    std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+    SDL_Quit();
+    return 1;
+  }
+  SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);  // window + renderer for display
+  if (!ren) {
+    std::fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
+    SDL_DestroyWindow(win);
+    SDL_Quit();
+    return 1;
+  }
+
+  // streaming texture for PPU framebuffer (256x240 RGB888)
+  SDL_Texture* tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB24,
+                                       SDL_TEXTUREACCESS_STREAMING,
+                                       nes::PPU::fb_width, nes::PPU::fb_height);
+  if (!tex) {
+    std::fprintf(stderr, "SDL_CreateTexture failed: %s\n", SDL_GetError());
+    SDL_DestroyRenderer(ren);
+    SDL_DestroyWindow(win);
+    SDL_Quit();
+    return 1;
+  }
 
   std::printf("Loaded %s (mapper %d, PRG %zu bytes, CHR %zu bytes)\n",
               path.c_str(), cart.mapper, cart.prg_size, cart.chr_size);
   std::printf("Reset vector: $%04X\n", cpu.PC);
 
-  constexpr int max_cycles = 10'000'000;
-  int total = 0;
-  while (total < max_cycles) {
-    total += cpu.step();
+  bool quit = false;
+  while (!quit) {
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+      if (e.type == SDL_QUIT)
+        quit = true;
+    }
+
+    int cycles = cpu.step();              // run one instruction
+    ppu.run_cycles(3 * cycles);           // 3 PPU cycles per CPU cycle
+
+    if (ppu.frame_ready()) {                // new frame finished: upload fb and present
+      void* pixels = nullptr;
+      int pitch = 0;
+      // load framebuffer into texture to display
+      if (SDL_LockTexture(tex, nullptr, &pixels, &pitch) == 0) {
+        std::memcpy(pixels, ppu.framebuffer(),
+                    static_cast<std::size_t>(nes::PPU::fb_width * nes::PPU::fb_height * nes::PPU::fb_bytes_per_pixel));
+        SDL_UnlockTexture(tex);
+      }
+      ppu.clear_frame_ready();
+      SDL_RenderClear(ren);
+      SDL_RenderCopy(ren, tex, nullptr, nullptr);
+      SDL_RenderPresent(ren);
+    }
   }
-  std::printf("Ran %d cycles\n", total);
+
+  SDL_DestroyTexture(tex);
+  SDL_DestroyRenderer(ren);
+  SDL_DestroyWindow(win);
+  SDL_Quit();
   return 0;
 }
